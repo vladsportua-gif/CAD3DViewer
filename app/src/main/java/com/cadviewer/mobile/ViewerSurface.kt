@@ -1,6 +1,8 @@
 package com.cadviewer.mobile
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
@@ -15,6 +17,8 @@ import kotlin.math.*
 class ViewerSurface(context:Context):GLSurfaceView(context) {
     val scene=SceneRenderer()
     private var lastX=0f;private var lastY=0f;private var lastSpan=0f
+    private var downX=0f;private var downY=0f
+    private var measureMode=false
     private var lastCenterX=0f;private var lastCenterY=0f
     init {
         setEGLContextClientVersion(2)
@@ -31,10 +35,22 @@ class ViewerSurface(context:Context):GLSurfaceView(context) {
     fun setAxes(value:Boolean){queueEvent{scene.axes=value};requestRender()}
     fun setPerspective(value:Boolean){queueEvent{scene.perspective=value};requestRender()}
     fun setColor(index:Int){queueEvent{scene.colorIndex=index};requestRender()}
+    fun setPart(index:Int,visible:Boolean){queueEvent{scene.setPart(index,visible)};requestRender()}
+    fun setClip(enabled:Boolean,ratio:Float){queueEvent{scene.clipEnabled=enabled;scene.clipZ=ratio*2f-1f};requestRender()}
+    fun setMeasure(enabled:Boolean,callback:(String)->Unit){
+        measureMode=enabled
+        queueEvent{scene.measurePoint=null;scene.measureCallback=if(enabled)callback else null}
+        requestRender()
+    }
+    fun capture(callback:(Bitmap)->Unit){
+        queueEvent{val picture=scene.capture();if(picture!=null)post{callback(picture)}}
+        requestRender()
+    }
     override fun onTouchEvent(e:MotionEvent):Boolean {
         when(e.actionMasked) {
             MotionEvent.ACTION_DOWN,MotionEvent.ACTION_POINTER_DOWN -> {
                 lastX=e.x;lastY=e.y
+                if(e.actionMasked==MotionEvent.ACTION_DOWN){downX=e.x;downY=e.y}
                 if(e.pointerCount>=2){
                     lastSpan=span(e)
                     lastCenterX=(e.getX(0)+e.getX(1))/2
@@ -65,6 +81,12 @@ class ViewerSurface(context:Context):GLSurfaceView(context) {
                 requestRender();return true
             }
             MotionEvent.ACTION_POINTER_UP,MotionEvent.ACTION_UP -> {
+                if(e.actionMasked==MotionEvent.ACTION_UP && measureMode && 
+                    hypot(e.x-downX,e.y-downY)<20f*resources.displayMetrics.density){
+                    val x=e.x;val y=e.y
+                    queueEvent{scene.pick(x,y)}
+                    requestRender()
+                }
                 lastSpan=0f
                 if(e.pointerCount>0){lastX=e.x;lastY=e.y}
                 return true
@@ -78,6 +100,10 @@ class ViewerSurface(context:Context):GLSurfaceView(context) {
 class SceneRenderer:GLSurfaceView.Renderer {
     var yaw=35f;var pitch=25f;var distance=4f;var panX=0f;var panY=0f
     var wire=false;var edges=false;var dark=true;var axes=true;var perspective=true;var colorIndex=0
+    var clipEnabled=false;var clipZ=0f
+    var measurePoint:FloatArray?=null
+    var measureCallback:((String)->Unit)?=null
+    private var partVisible=booleanArrayOf(true)
     private var shader=0;private var flatShader=0
     private var model=ModelLoader.demo()
     private var vertices:FloatBuffer=buffer(model.vertices)
@@ -89,9 +115,14 @@ class SceneRenderer:GLSurfaceView.Renderer {
     private val mv=FloatArray(16)
     private val mvp=FloatArray(16)
     fun install(m:ModelLoader.Model){
-        model=m;vertices=buffer(m.vertices);normals=buffer(m.normals);reset()
+        model=m;vertices=buffer(m.vertices);normals=buffer(m.normals)
+        partVisible=BooleanArray(m.parts.size){true}
+        measurePoint=null;clipEnabled=false;reset()
     }
     fun reset(){yaw=35f;pitch=25f;distance=4f;panX=0f;panY=0f}
+    fun setPart(index:Int,visible:Boolean){
+        if(index in partVisible.indices)partVisible[index]=visible
+    }
     fun setView(v:String){
         when(v){
             "Front"->{yaw=0f;pitch=0f}
@@ -145,26 +176,35 @@ class SceneRenderer:GLSurfaceView.Renderer {
             GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(shader,"uMVP"),1,false,mvp,0)
             GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(shader,"uMV"),1,false,mv,0)
             GLES20.glUniform3fv(GLES20.glGetUniformLocation(shader,"uColor"),1,palette[colorIndex.coerceIn(0,3)],0)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(shader,"uClipEnabled"),if(clipEnabled)1f else 0f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(shader,"uClipZ"),clipZ)
             vertices.position(0);normals.position(0)
             GLES20.glEnableVertexAttribArray(pos)
             GLES20.glVertexAttribPointer(pos,3,GLES20.GL_FLOAT,false,0,vertices)
             GLES20.glEnableVertexAttribArray(norm)
             GLES20.glVertexAttribPointer(norm,3,GLES20.GL_FLOAT,false,0,normals)
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLES,0,model.vertices.size/3)
+            model.parts.forEachIndexed{index,part->
+                if(partVisible.getOrElse(index){true})
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLES,part.start,part.count)
+            }
             GLES20.glDisableVertexAttribArray(pos)
             GLES20.glDisableVertexAttribArray(norm)
         }
-        if(wire||edges) {
+        if((wire||edges)&&!clipEnabled) {
             GLES20.glUseProgram(flatShader)
             GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(flatShader,"uMVP"),1,false,mvp,0)
             val c=if(dark) floatArrayOf(.95f,.97f,1f) else floatArrayOf(.12f,.16f,.22f)
             GLES20.glUniform3fv(GLES20.glGetUniformLocation(flatShader,"uColor"),1,c,0)
             val loc=GLES20.glGetAttribLocation(flatShader,"aPosition")
             GLES20.glEnableVertexAttribArray(loc)
-            for(start in model.vertices.indices step 9) {
-                vertices.position(start)
-                GLES20.glVertexAttribPointer(loc,3,GLES20.GL_FLOAT,false,0,vertices)
-                GLES20.glDrawArrays(GLES20.GL_LINE_LOOP,0,3)
+            model.parts.forEachIndexed { index,part->
+                if(partVisible.getOrElse(index){true}) {
+                    for(start in part.start*3 until (part.start+part.count)*3 step 9){
+                        vertices.position(start)
+                        GLES20.glVertexAttribPointer(loc,3,GLES20.GL_FLOAT,false,0,vertices)
+                        GLES20.glDrawArrays(GLES20.GL_LINE_LOOP,0,3)
+                    }
+                }
             }
             GLES20.glDisableVertexAttribArray(loc)
         }
@@ -214,8 +254,8 @@ class SceneRenderer:GLSurfaceView.Renderer {
             GLES20.glLinkProgram(id)
             return id
         }
-        private const val VERTEX="attribute vec3 aPosition; attribute vec3 aNormal; uniform mat4 uMVP; uniform mat4 uMV; varying vec3 vNormal; varying vec3 vEye; void main(){gl_Position=uMVP*vec4(aPosition,1.0);vNormal=mat3(uMV)*aNormal;vEye=(uMV*vec4(aPosition,1.0)).xyz;}"
-        private const val FRAGMENT="precision mediump float;varying vec3 vNormal;varying vec3 vEye;uniform vec3 uColor;void main(){vec3 n=normalize(vNormal);vec3 l=normalize(vec3(0.4,0.8,1.0));float dif=abs(dot(n,l));float ambient=0.32;float spec=pow(max(dot(reflect(-l,n),normalize(-vEye)),0.0),22.0)*0.20;gl_FragColor=vec4(uColor*(ambient+0.68*dif)+vec3(spec),1.0);}"
+        private const val VERTEX="attribute vec3 aPosition; attribute vec3 aNormal; uniform mat4 uMVP; uniform mat4 uMV; varying vec3 vNormal; varying vec3 vEye; varying float vZ; void main(){gl_Position=uMVP*vec4(aPosition,1.0);vNormal=mat3(uMV)*aNormal;vEye=(uMV*vec4(aPosition,1.0)).xyz;vZ=aPosition.z;}"
+        private const val FRAGMENT="precision mediump float;varying vec3 vNormal;varying vec3 vEye;varying float vZ;uniform vec3 uColor;uniform float uClipZ;uniform float uClipEnabled;void main(){if(uClipEnabled>0.5&&vZ>uClipZ)discard;vec3 n=normalize(vNormal);vec3 l=normalize(vec3(0.4,0.8,1.0));float dif=abs(dot(n,l));float ambient=0.32;float spec=pow(max(dot(reflect(-l,n),normalize(-vEye)),0.0),22.0)*0.20;gl_FragColor=vec4(uColor*(ambient+0.68*dif)+vec3(spec),1.0);}"
         private const val FLAT_VERTEX="attribute vec3 aPosition;uniform mat4 uMVP;void main(){gl_Position=uMVP*vec4(aPosition,1.0);}"
         private const val FLAT_FRAGMENT="precision mediump float;uniform vec3 uColor;void main(){gl_FragColor=vec4(uColor,1.0);}"
     }
