@@ -71,6 +71,23 @@ class MainActivity: Activity() {
         if(requestCode!=100 || resultCode!=RESULT_OK) return
         val uri=data?.data?:return
         val name=filename(uri)
+        val ext=name.substringAfterLast(".", "").lowercase()
+        if(ext=="ipt" || ext=="iam") {
+            status.text="$name  •  2D reference preview (3D available online)"
+            startActivity(Intent(this,IptPreviewActivity::class.java)
+                .putExtra("uri",uri.toString())
+                .putExtra("name",name))
+            return
+        }
+        if(ext=="sldprt" || ext=="sldasm") {
+            AlertDialog.Builder(this)
+                .setTitle("SolidWorks 3D")
+                .setMessage("Ця версія не декодує SLDPRT/SLDASM локально. Autodesk Viewer відкриває ці формати через інтернет після завантаження файла на сайт.")
+                .setPositiveButton("Autodesk Viewer"){_,_->
+                    startActivity(Intent(Intent.ACTION_VIEW,Uri.parse("https://viewer.autodesk.com/")))
+                }.setNegativeButton("Cancel",null).show()
+            return
+        }
         status.text="Loading $name..."
         worker.execute {
             try {
