@@ -32,6 +32,7 @@ jobs:
           FILE=app/src/main/java/com/cadviewer/mobile/MainActivity.kt
           awk '$0=="import android.webkit.WebView" {if (seen++) next} {print}' "$FILE" > "$FILE.tmp"
           mv "$FILE.tmp" "$FILE"
+          sed -i "s/CAD Studio 4.0/CAD Studio 5.0/g" app/src/main/assets/index.html
           gradle --no-daemon :app:assembleDebug
       - name: Upload APK
         uses: actions/upload-artifact@v4
