@@ -14,6 +14,9 @@ import java.util.concurrent.Executors
 class MainActivity: Activity() {
     private lateinit var viewer: ViewerSurface
     private lateinit var status: TextView
+    private var activeModel=ModelLoader.demo()
+    private var partVisibility=booleanArrayOf(true)
+    private var measuring=false
     private val worker=Executors.newSingleThreadExecutor()
     private val ink=Color.rgb(224,235,250)
     private val surface=Color.rgb(24,34,49)
@@ -33,7 +36,7 @@ class MainActivity: Activity() {
         window.navigationBarColor=Color.rgb(11,18,29)
         val root=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL;setBackgroundColor(Color.rgb(12,19,31)) }
         val header=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL }
-        header.addView(label("CAD 3D VIEWER",19f),LinearLayout.LayoutParams(0,dp(54),1f))
+        header.addView(label("CAD 3D VIEWER 2",16f),LinearLayout.LayoutParams(0,dp(54),1f))
         header.addView(button("OPEN"){openFile()},LinearLayout.LayoutParams(dp(86),dp(48)))
         header.addView(button("SETTINGS"){settings()},LinearLayout.LayoutParams(dp(99),dp(48)))
         root.addView(header)
@@ -49,11 +52,22 @@ class MainActivity: Activity() {
         viewer.setAxes(saved.getBoolean("axes",true))
         viewer.setPerspective(saved.getBoolean("persp",true))
         root.addView(viewer,LinearLayout.LayoutParams(-1,0,1f))
+        val bottomScroll=HorizontalScrollView(this).apply{isHorizontalScrollBarEnabled=false}
         val toolbar=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
-        toolbar.addView(button("FIT / RESET"){viewer.reset()},LinearLayout.LayoutParams(0,dp(46),1f))
-        toolbar.addView(button("DISPLAY"){displayMode()},LinearLayout.LayoutParams(0,dp(46),1f))
-        toolbar.addView(button("COLOR"){colorMode()},LinearLayout.LayoutParams(0,dp(46),1f))
-        root.addView(toolbar)
+        for((text,action) in listOf(
+            "FIT" to { viewer.reset() },
+            "DISPLAY" to { displayMode() },
+            "COLOR" to { colorMode() },
+            "SIZE" to { showSize() },
+            "PARTS" to { showParts() },
+            "MEASURE" to { toggleMeasure() },
+            "SECTION" to { showSection() },
+            "PNG" to { saveScreenshot() }
+        )){
+            toolbar.addView(button(text,action),LinearLayout.LayoutParams(dp(98),dp(48)))
+        }
+        bottomScroll.addView(toolbar)
+        root.addView(bottomScroll)
         status=label("Demo cube  •  One finger: rotate  •  Two fingers: zoom/pan",11f)
         status.setBackgroundColor(Color.rgb(18,27,42)); root.addView(status)
         setContentView(root)
@@ -68,8 +82,24 @@ class MainActivity: Activity() {
     @Deprecated("Used for Android 7+ compatibility without AndroidX")
     override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?) {
         super.onActivityResult(requestCode,resultCode,data)
-        if(requestCode!=100 || resultCode!=RESULT_OK) return
+        if(resultCode!=RESULT_OK)return
         val uri=data?.data?:return
+        if(requestCode==200) {
+            viewer.capture { bitmap ->
+                worker.execute {
+                    try {
+                        contentResolver.openOutputStream(uri)?.use { out ->
+                            check(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,out))
+                        }?:error("Не вдалося створити PNG")
+                        runOnUiThread{status.text="Зображення PNG збережено"}
+                    }catch(t:Exception){
+                        runOnUiThread{status.text="Помилка PNG: ${t.message}"}
+                    }finally{bitmap.recycle()}
+                }
+            }
+            return
+        }
+        if(requestCode!=100)return
         val name=filename(uri)
         val ext=name.substringAfterLast(".", "").lowercase()
         if(ext=="ipt" || ext=="iam") {
@@ -79,10 +109,10 @@ class MainActivity: Activity() {
                 .putExtra("name",name))
             return
         }
-        if(ext=="sldprt" || ext=="sldasm") {
+        if(ext in setOf("sldprt","sldasm","step","stp","iges","igs")) {
             AlertDialog.Builder(this)
-                .setTitle("SolidWorks 3D")
-                .setMessage("Ця версія не декодує SLDPRT/SLDASM локально. Autodesk Viewer відкриває ці формати через інтернет після завантаження файла на сайт.")
+                .setTitle("CAD формат: ${ext.uppercase()}")
+                .setMessage("Для цього формату потрібне CAD-ядро. Ця версія не відкриває STEP, IGES та SolidWorks автономно. Можна перейти в Autodesk Viewer і самостійно завантажити файл для 3D-перегляду.")
                 .setPositiveButton("Autodesk Viewer"){_,_->
                     startActivity(Intent(Intent.ACTION_VIEW,Uri.parse("https://viewer.autodesk.com/")))
                 }.setNegativeButton("Cancel",null).show()
@@ -105,8 +135,12 @@ class MainActivity: Activity() {
                 }?:error("Cannot read file")
                 val model=ModelLoader.load(bytes,name)
                 runOnUiThread {
+                    activeModel=model
+                    partVisibility=BooleanArray(model.parts.size){true}
+                    measuring=false
+                    viewer.setMeasure(false){}
                     viewer.updateModel(model)
-                    status.text="${model.name}  •  ${model.triangles} triangles"
+                    status.text="${model.name} · ${model.triangles} трикутників · ${model.parts.size} частин"
                 }
             }catch(t:Exception){
                 runOnUiThread{
@@ -134,6 +168,73 @@ class MainActivity: Activity() {
             viewer.setColor(n)
         }.show()
     }
+    private fun showSize(){
+        val m=activeModel
+        val d=m.bounds
+        val fmt={x:Float->String.format(java.util.Locale.US,"%.3f",x)}
+        AlertDialog.Builder(this).setTitle("Габарити моделі")
+            .setMessage("Файл: ${m.name}\nX: ${fmt(d[0])} ${m.units}\nY: ${fmt(d[1])} ${m.units}\nZ: ${fmt(d[2])} ${m.units}\n\n${m.triangles} трикутників · ${m.parts.size} частин\n\n" +
+                "Для STL/OBJ/PLY одиниці визначає автор файла. 3MF — міліметри. Розміри базуються на трикутній сітці.")
+            .setPositiveButton("OK",null).show()
+    }
+    private fun showParts(){
+        val m=activeModel
+        val labels=m.parts.map{"${it.name} (${it.count/3} трикутників)"}.toTypedArray()
+        val checked=partVisibility.copyOf()
+        AlertDialog.Builder(this).setTitle("Частини моделі")
+            .setMultiChoiceItems(labels,checked){_,i,visible->
+                checked[i]=visible
+                viewer.setPart(i,visible)
+            }.setPositiveButton("Готово"){_,_->partVisibility=checked}
+            .setNegativeButton("Всі видимі"){_,_->
+                partVisibility=BooleanArray(m.parts.size){true}
+                partVisibility.indices.forEach{viewer.setPart(it,true)}
+            }.show()
+    }
+    private fun toggleMeasure(){
+        measuring=!measuring
+        if(measuring){
+            viewer.setMeasure(true){message->runOnUiThread{status.text=message}}
+            status.text="Вимір: вибери дві точки на поверхні. MEASURE — вимкнути."
+        }else{
+            viewer.setMeasure(false){}
+            status.text="Режим вимірювання вимкнено"
+        }
+    }
+    private fun showSection(){
+        val layout=LinearLayout(this).apply{
+            orientation=LinearLayout.VERTICAL
+            setPadding(dp(20),dp(16),dp(20),dp(8))
+        }
+        val hint=TextView(this).apply{
+            text="Площина перерізу вздовж осі Z (без заповнення зрізу)"
+            setPadding(0,0,0,dp(12))
+        }
+        val slider=SeekBar(this).apply{max=100;progress=50}
+        layout.addView(hint);layout.addView(slider)
+        slider.setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
+            override fun onProgressChanged(s:SeekBar?,p:Int,fromUser:Boolean){
+                viewer.setClip(true,p/100f)
+            }
+            override fun onStartTrackingTouch(s:SeekBar?){}
+            override fun onStopTrackingTouch(s:SeekBar?){}
+        })
+        viewer.setClip(true,.5f)
+        AlertDialog.Builder(this).setTitle("Візуальний переріз")
+            .setView(layout)
+            .setPositiveButton("Залишити"){_,_->status.text="Площину перерізу застосовано"}
+            .setNegativeButton("Вимкнути"){_,_->
+                viewer.setClip(false,1f);status.text="Переріз вимкнено"
+            }.show()
+    }
+    private fun saveScreenshot(){
+        val intent=Intent(Intent.ACTION_CREATE_DOCUMENT).apply{
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type="image/png"
+            putExtra(Intent.EXTRA_TITLE,"CAD3D_${System.currentTimeMillis()}.png")
+        }
+        startActivityForResult(intent,200)
+    }
     private fun settings(){
         val prefs=getPreferences(MODE_PRIVATE)
         val names=arrayOf("Dark background","Show XYZ axes","Perspective projection")
@@ -146,7 +247,7 @@ class MainActivity: Activity() {
             }
             .setNeutralButton("About"){_,_->
                 AlertDialog.Builder(this).setTitle("Supported files")
-                    .setMessage("Open STL (ASCII/binary) or OBJ models. Native SolidWorks and Inventor parts require export to STL or OBJ. Offline. Maximum 60 MB or 400,000 triangles.")
+                    .setMessage("Offline 3D: STL, OBJ, PLY (ASCII/binary little-endian), 3MF. Inventor IPT/IAM: embedded 2D preview when available. STEP/STP, IGES and SolidWorks: Autodesk Viewer online, not offline. Mesh measurement, visual section, part visibility, PNG export. Limit 60 MB / 400,000 triangles.")
                     .setPositiveButton("OK",null).show()
             }
             .setNegativeButton("Cancel",null).show()
