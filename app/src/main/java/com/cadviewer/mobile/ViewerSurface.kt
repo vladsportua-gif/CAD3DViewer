@@ -210,6 +210,97 @@ class SceneRenderer:GLSurfaceView.Renderer {
         }
         if(axes) drawAxes()
     }
+
+    fun capture():Bitmap? {
+        val w=viewportWidth;val h=viewportHeight
+        if(w<=0 || h<=0 || w.toLong()*h>10_000_000L)return null
+        val raw=ByteBuffer.allocateDirect(w*h*4).order(ByteOrder.nativeOrder())
+        GLES20.glReadPixels(0,0,w,h,GLES20.GL_RGBA,GLES20.GL_UNSIGNED_BYTE,raw)
+        if(GLES20.glGetError()!=GLES20.GL_NO_ERROR)return null
+        val bytes=ByteArray(w*h*4)
+        raw.position(0);raw.get(bytes)
+        val pixels=IntArray(w*h)
+        for(y in 0 until h)for(x in 0 until w){
+            val i=4*(y*w+x)
+            val r=bytes[i].toInt() and 255
+            val g=bytes[i+1].toInt() and 255
+            val b=bytes[i+2].toInt() and 255
+            pixels[(h-1-y)*w+x]=Color.rgb(r,g,b)
+        }
+        return Bitmap.createBitmap(pixels,w,h,Bitmap.Config.ARGB_8888)
+    }
+    private fun minus(a:FloatArray,b:FloatArray):FloatArray=
+        floatArrayOf(a[0]-b[0],a[1]-b[1],a[2]-b[2])
+    private fun dot(a:FloatArray,b:FloatArray):Float=a[0]*b[0]+a[1]*b[1]+a[2]*b[2]
+    private fun cross(a:FloatArray,b:FloatArray)=floatArrayOf(
+        a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0])
+    private fun unproject(inv:FloatArray,nx:Float,ny:Float,nz:Float):FloatArray {
+        val out=FloatArray(4)
+        Matrix.multiplyMV(out,0,inv,0,floatArrayOf(nx,ny,nz,1f),0)
+        val w=if(abs(out[3])>1e-8f)out[3] else 1f
+        return floatArrayOf(out[0]/w,out[1]/w,out[2]/w)
+    }
+    fun pick(x:Float,y:Float){
+        val callback=measureCallback?:return
+        val inverse=FloatArray(16)
+        if(!Matrix.invertM(inverse,0,mvp,0))return
+        val nx=x/viewportWidth*2f-1f
+        val ny=1f-y/viewportHeight*2f
+        val from=unproject(inverse,nx,ny,-1f)
+        val to=unproject(inverse,nx,ny,1f)
+        val d=minus(to,from)
+        val len=sqrt(dot(d,d))
+        if(len<1e-8f)return
+        val direction=floatArrayOf(d[0]/len,d[1]/len,d[2]/len)
+        var nearest=Float.POSITIVE_INFINITY
+        var result:FloatArray?=null
+        for((index,part) in model.parts.withIndex()){
+            if(!partVisible.getOrElse(index){true})continue
+            val end=part.start+part.count
+            for(t in part.start until end step 3){
+                val p=t*3
+                val v=model.vertices
+                val a=floatArrayOf(v[p],v[p+1],v[p+2])
+                val b=floatArrayOf(v[p+3],v[p+4],v[p+5])
+                val c=floatArrayOf(v[p+6],v[p+7],v[p+8])
+                val e1=minus(b,a)
+                val e2=minus(c,a)
+                val pvec=cross(direction,e2)
+                val det=dot(e1,pvec)
+                if(abs(det)<1e-8f)continue
+                val inv=1f/det
+                val tvec=minus(from,a)
+                val u=dot(tvec,pvec)*inv
+                if(u<0f||u>1f)continue
+                val qvec=cross(tvec,e1)
+                val w=dot(direction,qvec)*inv
+                if(w<0f||u+w>1f)continue
+                val distance=dot(e2,qvec)*inv
+                if(distance<=0f||distance>=nearest)continue
+                val hit=floatArrayOf(from[0]+distance*direction[0],
+                    from[1]+distance*direction[1],from[2]+distance*direction[2])
+                if(clipEnabled&&hit[2]>clipZ)continue
+                nearest=distance
+                result=hit
+            }
+        }
+        val hit=result
+        if(hit==null){
+            callback("Не знайдено поверхню. Торкнися моделі.")
+            return
+        }
+        val first=measurePoint
+        if(first==null){
+            measurePoint=hit
+            callback("Точка 1 вибрана. Торкнися другої точки на моделі.")
+        } else {
+            val normalized=minus(hit,first)
+            val length=sqrt(dot(normalized,normalized))*model.sourceSize/2f
+            measurePoint=null
+            callback(String.format(java.util.Locale.US,"Відстань: %.3f %s (по поверхнях сітки)",length,model.units))
+        }
+    }
+
     private fun drawAxes(){
         GLES20.glUseProgram(flatShader)
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(flatShader,"uMVP"),1,false,mvp,0)
