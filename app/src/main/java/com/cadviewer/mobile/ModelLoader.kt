@@ -10,20 +10,68 @@ import kotlin.math.max
 object ModelLoader {
     const val MAX_BYTES=60 * 1024 * 1024
     const val MAX_TRIANGLES=400_000
-    data class Model(val vertices:FloatArray,val normals:FloatArray,val triangles:Int,val name:String)
+    data class Part(val name:String,val start:Int,val count:Int)
+    data class Model(
+        val vertices:FloatArray, val normals:FloatArray, val triangles:Int, val name:String,
+        val bounds:FloatArray=floatArrayOf(2f,2f,2f), val units:String="од. моделі",
+        val parts:List<Part> = listOf(Part("Модель",0,triangles*3)),
+        val sourceSize:Float=2f
+    )
     fun load(bytes:ByteArray,name:String):Model {
         require(bytes.isNotEmpty() && bytes.size<=MAX_BYTES){"File size must be 1–60 MB"}
         val ext=name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        if(ext=="3mf" || ext=="ply") {
+            val mesh=if(ext=="3mf") MeshExtras.read3mf(bytes) else MeshExtras.readPly(bytes)
+            val v=mesh.vertices.toFloatArray()
+            val n=mesh.normals.toFloatArray()
+            require(v.isNotEmpty()){"У файлі немає трикутників"}
+            val bounds=dimensions(v)
+            val largest=bounds.maxOrNull()?:1f
+            normalize(v)
+            return Model(v,n,v.size/9,name,bounds,mesh.units,mesh.parts,largest)
+        }
         val arrays=when(ext) {
             "obj" -> readObj(bytes)
             "stl" -> readStl(bytes)
-            else -> error("Unsupported .$ext format. Export the CAD file to STL or OBJ.")
+            else -> error("Unsupported .$ext. Supported 3D files: STL, OBJ, PLY, 3MF.")
         }
         require(arrays.first.isNotEmpty()){"No triangles found in the file"}
         val v=arrays.first.toFloatArray()
         val n=arrays.second.toFloatArray()
+        val bounds=dimensions(v)
+        val largest=bounds.maxOrNull()?:1f
         normalize(v)
-        return Model(v,n,v.size/9,name)
+        val parts=if(ext=="obj") readObjGroups(bytes,v.size/3) else listOf(Part("Модель",0,v.size/3))
+        return Model(v,n,v.size/9,name,bounds,"од. моделі",parts,largest)
+    }
+    private fun dimensions(v:FloatArray):FloatArray {
+        var minX=Float.POSITIVE_INFINITY;var minY=minX;var minZ=minX
+        var maxX=Float.NEGATIVE_INFINITY;var maxY=maxX;var maxZ=maxX
+        for(i in v.indices step 3){
+            minX=kotlin.math.min(minX,v[i]); minY=kotlin.math.min(minY,v[i+1]); minZ=kotlin.math.min(minZ,v[i+2])
+            maxX=max(maxX,v[i]); maxY=max(maxY,v[i+1]); maxZ=max(maxZ,v[i+2])
+        }
+        return floatArrayOf(maxX-minX,maxY-minY,maxZ-minZ)
+    }
+    private fun readObjGroups(bytes:ByteArray, totalVertices:Int):List<Part> {
+        val parts=ArrayList<Part>()
+        var group="Об'єкт 1"
+        var count=0
+        var position=0
+        ByteArrayInputStream(bytes).bufferedReader().useLines { lines ->
+            lines.forEach{raw->
+                val t=raw.trim()
+                if(t.startsWith("o ")||t.startsWith("g ")){
+                    if(count>0){parts.add(Part(group,position,count));position+=count;count=0}
+                    group=t.substring(2).trim().ifEmpty{"Об'єкт"}
+                } else if(t.startsWith("f ")){
+                    val vertices=t.substring(2).trim().split(Regex("\\s+")).takeWhile{!it.startsWith("#")}
+                    if(vertices.size>=3)count+=(vertices.size-2)*3
+                }
+            }
+        }
+        if(count>0)parts.add(Part(group,position,count))
+        return if(parts.isNotEmpty()&&position+count==totalVertices)parts else listOf(Part("Модель",0,totalVertices))
     }
     private fun normalize(v:FloatArray) {
         var minX=Float.POSITIVE_INFINITY;var minY=minX;var minZ=minX
